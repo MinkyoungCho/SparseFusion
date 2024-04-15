@@ -17,6 +17,7 @@ from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_detector
 from mmdet3d.utils import collect_env, get_root_logger
 from mmdet.apis import set_random_seed, train_detector
+import wandb
 
 
 def parse_args():
@@ -92,6 +93,8 @@ def main():
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
+    wandb.init(project="sparsefusion-2ndtrain-041124", config=cfg)
+
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
     # import modules from string list.
@@ -243,6 +246,11 @@ def main():
             CLASSES=datasets[0].CLASSES)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    
+    for name, param in model.named_parameters():
+        print (f"{name} {param.requires_grad}")
+        
+        
     train_detector(
         model,
         datasets,

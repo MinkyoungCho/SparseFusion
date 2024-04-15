@@ -1,6 +1,6 @@
 import mmcv
 import torch
-
+# from tools.visualize_results import visualize_bbox
 
 def single_gpu_test(model, data_loader, show=False, out_dir=None):
     """Test model with single gpu.
@@ -32,6 +32,20 @@ def single_gpu_test(model, data_loader, show=False, out_dir=None):
             model.module.show_results(data, result, out_dir)
 
         results.extend(result)
+        
+        
+        # if True:
+        #     visualize_bbox(
+        #         data=data,
+        #         data_name=f"sample_{i}",
+        #         outputs=result[0]["pts_bbox"], # okay
+        #         cfg=cfg,
+        #         topk_ncscore_dict=topk_ncscore_dict, 
+        #         topk_p_val_dict=topk_p_val_dict,
+        #         topk_top3_values_dict=topk_top3_values_dict,
+        #         topk_top3_indices_dict=topk_top3_indices_dict,
+        #     )
+        
 
         batch_size = len(result)
         for _ in range(batch_size):

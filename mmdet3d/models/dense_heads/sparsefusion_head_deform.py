@@ -25,10 +25,15 @@ from mmdet3d.models.utils import FFN, TransformerDecoderLayer, PositionEmbedding
 from mmdet3d.models.utils.ops.modules import MSDeformAttn
 from mmdet3d.models.utils.deformable_decoder import DeformableTransformerDecoderLayer
 
+from mmdet3d.core.feature_aligner.aligner import FeatureAligner
+from mmdet3d.core.feature_aligner.center_loss import CrossModalCenterLoss
+import wandb
+
 
 @HEADS.register_module()
 class SparseFusionHead2D_Deform(nn.Module):
     def __init__(self,
+                 run_mode=None,
                  num_views=0,
                  in_channels_img=64,
                  out_size_factor_img=4,
@@ -113,7 +118,25 @@ class SparseFusionHead2D_Deform(nn.Module):
         self.use_sigmoid_cls = loss_cls.get('use_sigmoid', False)
         if not self.use_sigmoid_cls:
             self.num_classes += 1
+            
+        ####### MK ######
+        self.final_feature_dimension = 128
+        tmp_mode = "train" #if self.run_mode == "train" else "test"
 
+        self.center_loss = CrossModalCenterLoss(
+            num_classes=10, feat_dim=self.final_feature_dimension, mode=tmp_mode
+        )
+
+        self.feature_aligner = FeatureAligner(
+            input_dim=128,
+            hidden_dim=256,
+            output_dim=self.final_feature_dimension,
+            mode=tmp_mode,
+        )
+        
+        self.run_mode = run_mode
+        ####################
+        
         heads3d = copy.deepcopy(common_heads)
         heads3d.update(dict(heatmap=(self.num_classes, 2)))
         pts_prediction_heads = FFN(hidden_channel, heads3d, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias)
@@ -445,8 +468,26 @@ class SparseFusionHead2D_Deform(nn.Module):
         # fusion layer
         #################################
 
-        all_query_feat, all_query_pos, fusion_ret_dicts = self.fusion_transformer(pts_query_feat, pts_query_pos, img_query_feat, img_query_pos_bev)
+        all_query_feat, all_query_pos, fusion_ret_dicts, pts_query_feat, img_query_feat = self.fusion_transformer(pts_query_feat, pts_query_pos, img_query_feat, img_query_pos_bev)
+        
+        # print (pts_ret_dicts[0].keys())
+        # print (img_ret_dicts[0].keys())
+        # print (view_ret_dicts[0].keys())
+        # print (fusion_ret_dicts[0].keys())
+        # print ("*"*10)
+        # print (pts_ret_dicts[0]['center'][0][0][:10])
+        # print (img_ret_dicts[0]['center_2d'][0][0][:10])
+        # print (view_ret_dicts[0]['center_view'][0][0][:10])
+        # print (fusion_ret_dicts[0]['center'][0][0][:10])
+        
+        # print ("*"*10)
+        # print (img_query_feat.shape)
+        # print (pts_query_feat.shape)
+        # print (all_query_feat.shape)
+        # print (img_query_pos_bev.shape)
+        # print ("*"*10)
 
+        # all_query_feat.shape: torch.Size([1, 128, 400])
         ret_dicts.extend(fusion_ret_dicts)
         if self.initialize_by_heatmap:
             ret_dicts[0]['query_heatmap_score'] = heatmap.gather(index=pts_top_proposals_index[:, None, :].expand(-1, self.num_classes, -1), dim=-1)  # [bs, num_classes, num_proposals]
@@ -468,7 +509,10 @@ class SparseFusionHead2D_Deform(nn.Module):
             for key in view_ret_dicts[0].keys():
                 new_res[key] = torch.cat([ret_dict[key] for ret_dict in view_ret_dicts], dim=-1)
 
-        return [new_res]
+
+        # print (f"head/ pts_query_feat: {pts_query_feat.shape} {pts_query_feat[0][0][:5]}")
+        # print (f"head/ img_query_feat: {img_query_feat.shape} {img_query_feat[0][0][:5]}")
+        return [new_res], pts_query_feat, img_query_feat
 
     def forward(self, feats, img_feats, img_metas, sparse_depth=None):
         """Forward pass.
@@ -489,9 +533,13 @@ class SparseFusionHead2D_Deform(nn.Module):
             sparse_depth = [None]
         else:
             sparse_depth = [sparse_depth[:, :, :self.level_num]]
-        res = multi_apply(self.forward_single, feats, img_feats, [img_metas], sparse_depth)
+        res, pts_query_feat, img_query_feat = multi_apply(self.forward_single, feats, img_feats, [img_metas], sparse_depth)
         assert len(res) == 1, "only support one level features."
-        return res
+        # print (f"head_2/ {len(res)}")
+        # print (f"head_2/ pts_query_feat: {pts_query_feat[0].shape} {pts_query_feat[0][0][0][:5]}")
+        # print (f"head_2/ img_query_feat: {img_query_feat[0].shape} {img_query_feat[0][0][0][:5]}")
+
+        return res, pts_query_feat, img_query_feat
 
     def construct_input_padding_mask(self, img_feats, img_metas):
         batch_size = len(img_metas)
@@ -881,7 +929,7 @@ class SparseFusionHead2D_Deform(nn.Module):
         num_pos_layer_2d = np.concatenate(res_tuple_2d[5], axis=0)  # [BS, num_layer]
         matched_ious_2d = torch.cat(res_tuple_2d[6], dim=0)
 
-        if self.view_transform:
+        if self.view_transform: # True
             res_tuple_view = multi_apply(self.get_targets_single_view, gt_bboxes_3d, gt_labels_3d, gt_visible, list_of_pred_dict, np.arange(len(gt_bboxes)))
             labels_view = torch.cat(res_tuple_view[0], dim=0)
             label_weights_view = torch.cat(res_tuple_view[1], dim=0)
@@ -891,10 +939,10 @@ class SparseFusionHead2D_Deform(nn.Module):
             num_pos_layer_view = np.concatenate(res_tuple_view[5], axis=0)  # [BS, num_layer]
             matched_ious_view = torch.cat(res_tuple_view[6], dim=0)
 
-        if self.initialize_by_heatmap:
+        if self.initialize_by_heatmap: # True
             heatmap = torch.cat(res_tuple[7], dim=0)
             heatmap_2d = torch.cat(res_tuple_2d[7], dim=0)
-            if self.view_transform:
+            if self.view_transform: # True
                 return labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, heatmap, \
                    labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
                    matched_ious_2d, heatmap_2d, labels_view, label_weights_view, bbox_targets_view, bbox_weights_view, \
@@ -1161,7 +1209,7 @@ class SparseFusionHead2D_Deform(nn.Module):
 
         boxes_dict = self.bbox_coder.decode(score, rot, dim, center, height, vel)  # decode the prediction to real world metric bbox
         bboxes_tensor = boxes_dict[0]['bboxes']
-        gt_bboxes_tensor = gt_bboxes_3d.tensor.to(score.device)
+        gt_bboxes_tensor = gt_bboxes_3d.tensor.to(score.device) # gt_bboxes_tensor.shape: [19, 9]
 
         num_fusion_decoder_layers = self.num_fusion_decoder_layers
 
@@ -1176,13 +1224,13 @@ class SparseFusionHead2D_Deform(nn.Module):
         for idx_layer in range(num_layer):
             layer_num_proposal = self.get_layer_num_proposal(idx_layer)
 
-            bboxes_tensor_layer = bboxes_tensor[start:start + layer_num_proposal, :]
+            bboxes_tensor_layer = bboxes_tensor[start:start + layer_num_proposal, :] # bboxes_tensor_layer.shape => [200, 9]
             score_layer = score[..., start:start + layer_num_proposal]
 
-            gt_bboxes_tensor_layer = gt_bboxes_tensor
-            gt_labels_3d_layer = gt_labels_3d
+            gt_bboxes_tensor_layer = gt_bboxes_tensor # shape: [19, 9]
+            gt_labels_3d_layer = gt_labels_3d  # shape: [19]
 
-            if self.train_cfg.assigner.type == 'HungarianAssigner3D':
+            if self.train_cfg.assigner.type == 'HungarianAssigner3D': # True
                 assign_result = self.bbox_assigner.assign(bboxes_tensor_layer, gt_bboxes_tensor_layer, gt_labels_3d_layer, score_layer, self.train_cfg)
             elif self.train_cfg.assigner.type == 'HeuristicAssigner':
                 assign_result = self.bbox_assigner.assign(bboxes_tensor_layer, gt_bboxes_tensor_layer, None, gt_labels_3d_layer, self.query_labels[batch_idx])
@@ -1432,8 +1480,8 @@ class SparseFusionHead2D_Deform(nn.Module):
         Returns:
             dict[str:torch.Tensor]: Loss of heatmap and bbox of each task.
         """
-        if self.initialize_by_heatmap:
-            if self.view_transform:
+        if self.initialize_by_heatmap: # True
+            if self.view_transform: # True
                 labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, heatmap, \
                 labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
                 matched_ious_2d, heatmap_2d, labels_view, label_weights_view, bbox_targets_view, bbox_weights_view, ious_view, \
@@ -1443,7 +1491,7 @@ class SparseFusionHead2D_Deform(nn.Module):
                 labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
                 matched_ious_2d, heatmap_2d = self.get_targets(gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, gt_bboxes_lidar_view, preds_dicts[0], img_metas)
         else:
-            if self.view_transform:
+            if self.view_transform: 
                 labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, \
                 labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
                 matched_ious_2d, labels_view, label_weights_view, bbox_targets_view, bbox_weights_view, ious_view, \
@@ -1511,11 +1559,11 @@ class SparseFusionHead2D_Deform(nn.Module):
             else:
                 prefix = f'layer_fusion_{idx_layer-self.num_pts_decoder_layers}'
 
-            layer_labels = labels[..., start:start + layer_num_proposals].reshape(-1)
-            layer_label_weights = label_weights[..., start:start + layer_num_proposals].reshape(-1)
-            layer_score = preds_dict['heatmap'][..., start:start + layer_num_proposals]
-            layer_cls_score = layer_score.permute(0, 2, 1).reshape(-1, self.num_classes)
-            layer_loss_cls = self.loss_cls(layer_cls_score, layer_labels, layer_label_weights, avg_factor=max(num_pos_layer[idx_layer], 1))
+            layer_labels = labels[..., start:start + layer_num_proposals].reshape(-1)  # [200] first 200 elements 
+            layer_label_weights = label_weights[..., start:start + layer_num_proposals].reshape(-1) # [200]
+            layer_score = preds_dict['heatmap'][..., start:start + layer_num_proposals]   
+            layer_cls_score = layer_score.permute(0, 2, 1).reshape(-1, self.num_classes)  # [200, 10]
+            layer_loss_cls = self.loss_cls(layer_cls_score, layer_labels, layer_label_weights, avg_factor=max(num_pos_layer[idx_layer], 1)) # one value: 0.1214
 
             layer_center = preds_dict['center'][..., start:start + layer_num_proposals]
             layer_height = preds_dict['height'][..., start:start + layer_num_proposals]
@@ -1580,7 +1628,7 @@ class SparseFusionHead2D_Deform(nn.Module):
                 layer_loss_vel_2d = 0
             loss_dict[f'{prefix}_matched_ious_2d'] = layer_match_ious_2d
             loss_dict[f'{prefix}_reg_bbox_2d'] = (layer_loss_center_2d+layer_loss_depth_2d+layer_loss_dim_2d+layer_loss_rot_2d+layer_loss_vel_2d).detach()
-        if self.view_transform:
+        if self.view_transform: # True
             layer_labels_view = labels_view.reshape(-1)
             layer_label_weights_view = label_weights_view.reshape(-1)
             layer_cls_score = preds_dict['heatmap_view'].permute(0, 2, 1).reshape(-1, self.num_classes)
@@ -1611,6 +1659,90 @@ class SparseFusionHead2D_Deform(nn.Module):
             loss_dict['view_matched_ious'] = layer_match_ious_view
 
         return loss_dict
+
+
+    @force_fp32(apply_to=('preds_dicts'))
+    def auxiliary_loss(self, gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_pts_centers_view, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, gt_bboxes_lidar_view, img_metas, preds_dicts, 
+                       pts_query_feat=None, img_query_feat=None, gt_bboxes_ignore=None, img_pts_output_dict=None):
+                
+        if self.initialize_by_heatmap: # True
+            if self.view_transform: # True
+                labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, heatmap, \
+                labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
+                matched_ious_2d, heatmap_2d, labels_view, label_weights_view, bbox_targets_view, bbox_weights_view, ious_view, \
+                num_pos_layer_view, matched_ious_view = self.get_targets(gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, gt_bboxes_lidar_view, preds_dicts[0], img_metas)
+            else:
+                labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, heatmap, \
+                labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
+                matched_ious_2d, heatmap_2d = self.get_targets(gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, gt_bboxes_lidar_view, preds_dicts[0], img_metas)
+        else:
+            if self.view_transform: 
+                labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, \
+                labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, \
+                matched_ious_2d, labels_view, label_weights_view, bbox_targets_view, bbox_weights_view, ious_view, \
+                num_pos_layer_view, matched_ious_view = self.get_targets(gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, preds_dicts[0], img_metas)
+            else:
+                labels, label_weights, bbox_targets, bbox_weights, ious, num_pos_layer, matched_ious, \
+                labels_2d, label_weights_2d, bbox_targets_2d, bbox_weights_2d, ious_2d, num_pos_layer_2d, matched_ious_2d = \
+                    self.get_targets(gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, preds_dicts[0], img_metas)        # if hasattr(self, 'on_the_image_mask'):
+
+        preds_dict = preds_dicts[0][0]
+        loss_dict = dict()
+        
+        
+        assert gt_bboxes_ignore is None, (
+            f"{self.__class__.__name__} only supports "
+            f"for gt_bboxes_ignore setting to None."
+        )
+
+        # img_features.shape = [1, 900, 256]
+        # img_feats_aligned.shape = [1, 900, 128]
+        
+        # img_pts_output_dict[f"img{lid}"] = img_output
+        # img_pts_output_dict[f"pts{lid}"] = pts_output
+
+        # print (f"head_auxloss/ pts_query_feat: {pts_query_feat[0].shape} {pts_query_feat[0][0][0][:5]}")
+        # print (f"head_auxloss/ img_query_feat: {img_query_feat[0].shape} {img_query_feat[0][0][0][:5]}")
+
+        # print (img_query_feat[0].shape)
+        
+        img_query_feat = img_query_feat[0].permute(0, 2, 1)
+        pts_query_feat = pts_query_feat[0].permute(0, 2, 1)
+
+        img_feats_aligned = self.feature_aligner(img_query_feat)
+        pts_feats_aligned = self.feature_aligner(pts_query_feat)
+                
+        loss_center, loss_geomed, loss_sep = self.center_loss(
+            labels_2d, labels, img_feats_aligned, pts_feats_aligned
+        )
+
+        losses_center = [loss_center * 0.5]
+        losses_additional = [loss_geomed]
+        losses_sep = [loss_sep]
+
+        # loss_center = [torch.nan_to_num(loss_center) * 0.5]
+        # loss_geomed = [torch.nan_to_num(loss_geomed)]
+        # loss_sep = [torch.nan_to_num(loss_sep)]
+
+        loss_dict = dict()
+
+        # loss from the last decoder layer
+        num_dec_layers=1
+        for i in range(num_dec_layers):
+            loss_dict[f"loss_center{i}"] = losses_center[i]
+            loss_dict[f"loss_additional{i}"] = losses_additional[i]
+            loss_dict[f"loss_sep{i}"] = losses_sep[i]
+            
+        # print (loss_center)
+        # print (loss_geomed)
+        # print (loss_sep)
+
+
+        if self.run_mode == "train":
+            wandb.log({"loss_center0": losses_center[0], "loss_geomed0": losses_additional[0], "loss_sep0": losses_sep[0]})
+
+        return loss_dict
+        
 
     def get_bboxes(self, preds_dicts, img_metas, img=None, rescale=False, for_roi=False):
         """Generate bboxes from bbox head predictions.

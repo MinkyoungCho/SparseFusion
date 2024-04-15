@@ -23,11 +23,38 @@ class SparseFusionDetector(MVXTwoStageDetector):
 
     def __init__(self, **kwargs):
         super(SparseFusionDetector, self).__init__(**kwargs)
+        
 
         self.freeze_img = kwargs.get('freeze_img', True)
         self.freeze_img_head = kwargs.get('freeze_img_head', False)
 
         self.init_weights(pretrained=kwargs.get('pretrained', None))
+        
+        # mk: freeze backbone
+        if True: # when wh training 
+            self._freeze_backbone()
+
+
+    def _freeze_backbone(self):
+        
+        for modules in [self.img_backbone, self.img_neck, self.pts_backbone, \
+                        self.pts_middle_encoder, self.pts_neck]: 
+            if modules is not None:
+                modules.eval()
+                for param in modules.parameters():
+                    param.requires_grad = False
+                    
+
+        for modules in [self.pts_bbox_head]:
+            if modules is not None:
+                for name, param in modules.named_parameters():
+                    if "center_loss" in name or "feature_aligner" in name:
+                        param.requires_grad = True # True if not od-wh-finetune (wh training: True)
+                    else:
+                        param.requires_grad = (
+                            False  # True if od-wh-finetune (wh training: False)
+                        )
+
 
     def init_weights(self, pretrained=None):
         """Initialize model weights."""
@@ -201,6 +228,7 @@ class SparseFusionDetector(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
+        
         img_feats, pts_feats = self.extract_feat(
             points, img=img, img_metas=img_metas)
         losses = dict()
@@ -250,16 +278,40 @@ class SparseFusionDetector(MVXTwoStageDetector):
         Returns:
             dict: Losses of each branch.
         """
-        outs = self.pts_bbox_head(pts_feats, img_feats, img_metas, sparse_depth)
+        outs, pts_query_feat, img_query_feat = self.pts_bbox_head(pts_feats, img_feats, img_metas, sparse_depth)
+
+        # print (len(pts_query_feat))
+        # print (len(img_query_feat))
+        # print (f"detector/ pts_query_feat: {pts_query_feat[0].shape} {pts_query_feat[0][0][0][:5]}")
+        # print (f"detector/ img_query_feat: {img_query_feat[0].shape} {img_query_feat[0][0][0][:5]}")
+        # # print (outs)
+        # print ("detector/", outs[0][0].keys())
+        
+        
+        
+        # original sparsefusion code
+        # loss_inputs = [gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_pts_centers_view, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, gt_bboxes_lidar_view, img_metas, outs]
+        # losses = self.pts_bbox_head.loss(*loss_inputs)
+       
+       
+        # 2D image label: gt_labels[0][:,0] (shape: torch.Size([22]))
+        # 3D labels:gt_labels_3d[0] (shape: torch.Size([19]))
 
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, gt_pts_centers_view, gt_img_centers_view, gt_bboxes_cam_view, gt_visible_3d, gt_bboxes_lidar_view, img_metas, outs]
-        losses = self.pts_bbox_head.loss(*loss_inputs)
+        losses = self.pts_bbox_head.auxiliary_loss(  # for decoupled training and calibration phase
+            *loss_inputs,
+            pts_query_feat=pts_query_feat, # not aligned
+            img_query_feat=img_query_feat, # not aligned 
+            gt_bboxes_ignore=gt_bboxes_ignore,
+            img_pts_output_dict=None,
+        )
+
         return losses
 
     def simple_test_pts(self, x, x_img, img_metas, rescale=False, sparse_depth=None):
         """Test function of point cloud branch."""
 
-        outs = self.pts_bbox_head(x, x_img, img_metas, sparse_depth)
+        outs, pts_query_feat, img_query_feat = self.pts_bbox_head(x, x_img, img_metas, sparse_depth)
 
         bbox_list = self.pts_bbox_head.get_bboxes(
             outs, img_metas, rescale=rescale)
@@ -317,5 +369,5 @@ class SparseFusionDetector(MVXTwoStageDetector):
         if num_augs == 1:
             img = [img] if img is None else img
             return self.simple_test(points[0], img_metas[0], img[0], sparse_depth[0], **kwargs)
-        else:
+        else: # True
             return self.aug_test(points, img_metas, img, **kwargs)

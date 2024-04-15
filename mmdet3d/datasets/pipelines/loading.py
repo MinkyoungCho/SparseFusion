@@ -490,6 +490,12 @@ class LoadMultiViewImageFromFiles(object):
                 - img_norm_cfg (dict): Normalization configuration of images.
         """
         filename = results['img_filename']
+        for f_idx, f_namae in enumerate(filename):
+            if "/y/minkycho" in f_namae:
+                # print ("before", filename[f_idx])
+                filename[f_idx] = filename[f_idx].replace("/y/minkycho", "/nfs/turbo/coe-zmao/minkycho")
+                # print ("after", filename[f_idx])
+        
         if self.img_scale is None:
             img = np.stack(
                 [mmcv.imread(name, self.color_type) for name in filename], axis=-1)
@@ -510,7 +516,7 @@ class LoadMultiViewImageFromFiles(object):
         num_channels = 1 if len(img.shape) < 3 else img.shape[2]
         results['img_norm_cfg'] = dict(
             mean=np.zeros(num_channels, dtype=np.float32),
-            std=np.ones(num_channels, dtype=np.float32),
+            std=np.ones(num_channels, dtype=np.float32), 
             to_rgb=False)
         results['img_fields'] = ['img']
         return results
@@ -572,6 +578,9 @@ class LoadPointsFromMultiSweeps(object):
         if self.file_client is None:
             self.file_client = mmcv.FileClient(**self.file_client_args)
         try:
+            if "/y/minkycho" in pts_filename:
+                pts_filename = pts_filename.replace("/y/minkycho", "/nfs/turbo/coe-zmao/minkycho")
+
             pts_bytes = self.file_client.get(pts_filename)
             points = np.frombuffer(pts_bytes, dtype=np.float32)
         except ConnectionError:

@@ -7,7 +7,7 @@ voxel_size = [0.075, 0.075, 0.2]
 out_size_factor = 8
 evaluation = dict(interval=1)
 dataset_type = 'NuScenesDataset_ViewInfo'
-data_root = 'data/nuscenes/'
+data_root = 'data/nuscenes'
 input_modality = dict(
     use_lidar=True,
     use_camera=True,

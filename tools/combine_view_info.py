@@ -102,6 +102,8 @@ def combine_data(data_root, info_file, coco_file, output_file):
             lidar2cam_rt = np.eye(4)
             lidar2cam_rt[:3, :3] = lidar2cam_r.T
             lidar2cam_rt[3, :3] = -lidar2cam_t
+            
+            # print (cam_info.keys())
             intrinsic = cam_info['cam_intrinsic']
             viewpad = np.eye(4)
             viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
